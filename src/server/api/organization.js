@@ -1,6 +1,7 @@
 import { mapFieldsToModel } from "./lib/utils";
 import { getConfig } from "./lib/config";
 import { r, Organization, cacheableData } from "../models";
+import { getTags } from "./tag";
 import { accessRequired } from "./errors";
 import { getCampaigns } from "./campaign";
 import { buildUsersQuery } from "./user";
@@ -38,6 +39,16 @@ export const resolvers = {
       await accessRequired(user, organization.id, "SUPERVOLUNTEER");
       return buildUsersQuery(organization.id, role, { campaignId }, sortBy);
     },
+    tags: async (organization, { group }, { user }) => {
+      let groupFilter = group;
+      try {
+        await accessRequired(user, organization.id, "SUPERVOLUNTEER");
+      } catch (err) {
+        await accessRequired(user, organization.id, "TEXTER");
+        groupFilter = "texter-tags";
+      }
+      return getTags(organization, groupFilter);
+    },
     availableActions: async (organization, _, { user, loaders }) => {
       await accessRequired(user, organization.id, "SUPERVOLUNTEER");
       const availableHandlers = await getAvailableActionHandlers(
@@ -60,8 +71,6 @@ export const resolvers = {
 
       return Promise.all(promises);
     },
-    threeClickEnabled: organization =>
-      organization.features.indexOf("threeClick") !== -1,
     textingHoursEnforced: organization => organization.texting_hours_enforced,
     optOutMessage: organization =>
       (organization.features &&
@@ -71,6 +80,17 @@ export const resolvers = {
       "I'm opting you out of texts immediately. Have a great day.",
     textingHoursStart: organization => organization.texting_hours_start,
     textingHoursEnd: organization => organization.texting_hours_end,
+    texterUIConfig: async (organization, _, { user }) => {
+      await accessRequired(user, organization.id, "OWNER");
+      const options = getConfig("TEXTER_UI_SETTINGS", organization) || null;
+      // note this is global, since we need the set that's globally enabled/allowed to choose from
+      const sideboxConfig = getConfig("TEXTER_SIDEBOXES");
+      const sideboxChoices = (sideboxConfig && sideboxConfig.split(",")) || [];
+      return {
+        options,
+        sideboxChoices
+      };
+    },
     cacheable: (org, _, { user }) =>
       //quanery logic.  levels are 0, 1, 2
       r.redis ? (getConfig("REDIS_CONTACT_CACHE", org) ? 2 : 1) : 0,
@@ -164,8 +184,10 @@ export const resolvers = {
         .knex("owned_phone_number")
         .select(
           "area_code",
-          r.knex.raw("count(allocated_to) as allocated_count"),
-          r.knex.raw("count(allocated_to IS NULL) as available_count")
+          r.knex.raw("COUNT(allocated_to) as allocated_count"),
+          r.knex.raw(
+            "SUM(CASE WHEN allocated_to IS NULL THEN 1 END) as available_count"
+          )
         )
         .where({
           service,

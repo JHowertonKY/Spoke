@@ -1,6 +1,6 @@
 import { resolvers } from "../src/server/api/schema";
 import { schema } from "../src/api/schema";
-import { assignmentRequired } from "../src/server/api/errors";
+import { assignmentRequiredOrAdminRole } from "../src/server/api/errors";
 import { graphql } from "graphql";
 
 console.log("This is an intentional error");
@@ -114,7 +114,6 @@ async function createOrganization(user, name, userId, inviteId) {
       id
       uuid
       name
-      threeClickEnabled
       textingHoursEnforced
       textingHoursStart
       textingHoursEnd
@@ -261,34 +260,6 @@ describe("graphql test suite", async () => {
     );
   });
 
-  it("should add texters to a organization", async () => {
-    testTexterUser = await createUser({
-      auth0_id: "test456",
-      first_name: "TestTexterFirst",
-      last_name: "TestTexterLast",
-      cell: "555-555-6666",
-      email: "testtexter@example.com"
-    });
-    const joinQuery = `
-    mutation joinOrganization($organizationUuid: String!) {
-      joinOrganization(organizationUuid: $organizationUuid) {
-        id
-      }
-    }`;
-    const variables = {
-      organizationUuid: testOrganization.data.createOrganization.uuid
-    };
-    const context = getContext({ user: testTexterUser });
-    const result = await graphql(
-      mySchema,
-      joinQuery,
-      rootValue,
-      context,
-      variables
-    );
-    expect(result.data.joinOrganization.id).toBeTruthy();
-  });
-
   it("should assign texters to campaign contacts", async () => {
     const campaignEditQuery = `
     mutation editCampaign($campaignId: String!, $campaign: CampaignInput!) {
@@ -332,6 +303,8 @@ describe("graphql test suite", async () => {
     const context = getContext({ user: testAdminUser });
     const updateCampaign = Object.assign({}, testCampaign.data.createCampaign);
     const campaignId = updateCampaign.id;
+    testTexterUser = await helperCreateTexter(testOrganization);
+
     updateCampaign.texters = [
       {
         id: testTexterUser.id
@@ -527,34 +500,6 @@ describe("graphql test suite", async () => {
           { user: adminUser }
         );
         expect(results).toEqual(false);
-      });
-
-      test("test assignmentRequired access control", async () => {
-        const user = await createUser();
-
-        const assignment = await new Assignment({
-          user_id: user.id,
-          campaign_id: campaign.id
-        }).save();
-
-        const allowUser = await assignmentRequired(
-          user,
-          assignment.id,
-          assignment
-        );
-        expect(allowUser).toEqual(true);
-        const allowUserAssignmentId = await assignmentRequired(
-          user,
-          assignment.id
-        );
-        expect(allowUserAssignmentId.user_id).toEqual(user.id);
-        expect(allowUserAssignmentId.id).toEqual(assignment.id);
-        try {
-          const notAllowed = await assignmentRequired(user, -1);
-          throw new Exception("should throw BEFORE this exception");
-        } catch (err) {
-          expect(/not authorized/.test(String(err))).toEqual(true);
-        }
       });
     });
 

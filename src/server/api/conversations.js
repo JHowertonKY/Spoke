@@ -1,15 +1,14 @@
 import _ from "lodash";
-import { Assignment, r, cacheableData, loaders } from "../models";
+import { Assignment, r, cacheableData } from "../models";
 import { addWhereClauseForContactsFilterMessageStatusIrrespectiveOfPastDue } from "./assignment";
 import { addCampaignsFilterToQuery } from "./campaign";
 import { log } from "../../lib";
+import { getConfig } from "../api/lib/config";
 
 function getConversationsJoinsAndWhereClause(
   queryParam,
   organizationId,
-  campaignsFilter,
-  assignmentsFilter,
-  contactsFilter,
+  { campaignsFilter, assignmentsFilter, contactsFilter, messageTextFilter },
   forData
 ) {
   let query = queryParam
@@ -27,6 +26,17 @@ function getConversationsJoinsAndWhereClause(
       .leftJoin("user", "assignment.user_id", "user.id");
   }
 
+  if (messageTextFilter && !forData) {
+    // NOT forData -- just for filter -- and then we need ALL the messages
+    query = query
+      .join(
+        "message AS msgfilter",
+        "msgfilter.campaign_contact_id",
+        "campaign_contact.id"
+      )
+      .where("msgfilter.text", "LIKE", `%${messageTextFilter}%`);
+  }
+
   query = addWhereClauseForContactsFilterMessageStatusIrrespectiveOfPastDue(
     query,
     contactsFilter && contactsFilter.messageStatus
@@ -34,6 +44,32 @@ function getConversationsJoinsAndWhereClause(
 
   if (contactsFilter && "isOptedOut" in contactsFilter) {
     query = query.where("is_opted_out", contactsFilter.isOptedOut);
+  }
+
+  if (
+    getConfig("EXPERIMENTAL_TAGS", null, { truthy: 1 }) &&
+    contactsFilter &&
+    contactsFilter.tags
+  ) {
+    const tags = contactsFilter.tags;
+
+    let tagsSubquery = r.knex
+      .select(1)
+      .from("tag_campaign_contact")
+      .whereRaw(
+        "campaign_contact.id = tag_campaign_contact.campaign_contact_id"
+      );
+
+    if (tags.length === 0) {
+      // no tags
+      query = query.whereNotExists(tagsSubquery);
+    } else if (tags.length === 1 && tags[0] === "*") {
+      // any tag
+      query = query.whereExists(tagsSubquery);
+    } else {
+      tagsSubquery = tagsSubquery.whereIn("tag_id", tags);
+      query = query.whereExists(tagsSubquery);
+    }
   }
 
   return query;
@@ -60,10 +96,9 @@ function mapQueryFieldsToResolverFields(queryResult, fieldsMap) {
 export async function getConversations(
   cursor,
   organizationId,
-  campaignsFilter,
-  assignmentsFilter,
-  contactsFilter,
+  { campaignsFilter, assignmentsFilter, contactsFilter, messageTextFilter },
   utc,
+  includeTags,
   awsContext
 ) {
   /* Query #1 == get campaign_contact.id for all the conversations matching
@@ -74,9 +109,12 @@ export async function getConversations(
   offsetLimitQuery = getConversationsJoinsAndWhereClause(
     offsetLimitQuery,
     organizationId,
-    campaignsFilter,
-    assignmentsFilter,
-    contactsFilter
+    {
+      campaignsFilter,
+      assignmentsFilter,
+      contactsFilter,
+      messageTextFilter
+    }
   );
 
   offsetLimitQuery = offsetLimitQuery.orderBy("cc_id", "desc");
@@ -130,9 +168,12 @@ export async function getConversations(
   query = getConversationsJoinsAndWhereClause(
     query,
     organizationId,
-    campaignsFilter,
-    assignmentsFilter,
-    contactsFilter,
+    {
+      campaignsFilter,
+      assignmentsFilter,
+      contactsFilter,
+      messageTextFilter
+    },
     true
   );
 
@@ -179,6 +220,33 @@ export async function getConversations(
     );
   }
 
+  // tags query
+  if (getConfig("EXPERIMENTAL_TAGS", null, { truthy: 1 }) && includeTags) {
+    const tagsQuery = r.knex
+      .select(
+        "tag_campaign_contact.campaign_contact_id as campaign_contact_id",
+        "tag.name as name",
+        "tag_campaign_contact.value as value"
+      )
+      .from("tag_campaign_contact")
+      .join("tag", "tag.id", "=", "tag_campaign_contact.tag_id")
+      .whereIn("campaign_contact_id", ccIds);
+
+    const rows = await tagsQuery;
+
+    const contactTags = {};
+    rows.forEach(tag => {
+      const campaignContactId = Number(tag.campaign_contact_id);
+      contactTags[campaignContactId] = contactTags[campaignContactId] || [];
+      contactTags[campaignContactId].push(tag);
+    });
+
+    conversations.forEach(convo => {
+      // eslint-disable-next-line no-param-reassign
+      convo.tags = contactTags[convo.ccId];
+    });
+  }
+
   /* Query #3 -- get the count of all conversations matching the criteria.
    * We need this to show total number of conversations to support paging */
   console.log(
@@ -188,9 +256,12 @@ export async function getConversations(
   const conversationsCountQuery = getConversationsJoinsAndWhereClause(
     r.knex,
     organizationId,
-    campaignsFilter,
-    assignmentsFilter,
-    contactsFilter
+    {
+      campaignsFilter,
+      assignmentsFilter,
+      contactsFilter,
+      messageTextFilter
+    }
   );
   let conversationCount;
   try {
@@ -203,12 +274,6 @@ export async function getConversations(
     console.log("getConversations timeout", err);
   }
 
-  console.log(
-    "getConversations query3 result",
-    Number(new Date()) - Number(starttime),
-    conversationCount,
-    conversations
-  );
   const pageInfo = {
     limit: cursor.limit,
     offset: cursor.offset,
@@ -221,28 +286,20 @@ export async function getConversations(
   };
 }
 
-export async function getCampaignIdMessageIdsAndCampaignIdContactIdsMaps(
+export async function getCampaignIdContactIdsMaps(
   organizationId,
-  campaignsFilter,
-  assignmentsFilter,
-  contactsFilter
+  { campaignsFilter, assignmentsFilter, contactsFilter, messageTextFilter }
 ) {
   let query = r.knex.select(
     "campaign_contact.id as cc_id",
-    "campaign.id as cmp_id",
-    "message.id as mess_id"
+    "campaign.id as cmp_id"
   );
 
-  query = getConversationsJoinsAndWhereClause(
-    query,
-    organizationId,
+  query = getConversationsJoinsAndWhereClause(query, organizationId, {
     campaignsFilter,
     assignmentsFilter,
-    contactsFilter
-  );
-
-  query = query.leftJoin("message", table => {
-    table.on("message.campaign_contact_id", "=", "campaign_contact.id");
+    contactsFilter,
+    messageTextFilter
   });
 
   query = query.orderBy("cc_id");
@@ -250,7 +307,6 @@ export async function getCampaignIdMessageIdsAndCampaignIdContactIdsMaps(
   const conversationRows = await query;
 
   const campaignIdContactIdsMap = new Map();
-  const campaignIdMessagesIdsMap = new Map();
 
   let ccId = undefined;
   for (const conversationRow of conversationRows) {
@@ -263,28 +319,16 @@ export async function getCampaignIdMessageIdsAndCampaignIdContactIdsMaps(
       }
 
       campaignIdContactIdsMap.get(conversationRow.cmp_id).push(ccId);
-
-      if (!campaignIdMessagesIdsMap.has(conversationRow.cmp_id)) {
-        campaignIdMessagesIdsMap.set(conversationRow.cmp_id, []);
-      }
-    }
-
-    if (conversationRow.mess_id) {
-      campaignIdMessagesIdsMap
-        .get(conversationRow.cmp_id)
-        .push(conversationRow.mess_id);
     }
   }
 
   return {
-    campaignIdContactIdsMap,
-    campaignIdMessagesIdsMap
+    campaignIdContactIdsMap
   };
 }
 
 export async function reassignConversations(
   campaignIdContactIdsMap,
-  campaignIdMessagesIdsMap,
   newTexterUserId
 ) {
   // ensure existence of assignments
@@ -327,7 +371,6 @@ export async function reassignConversations(
       // to be refreshed. We also update the assignment in the cache
       await Promise.all(
         campaignContactIds.map(async campaignContactId => {
-          loaders.campaignContact.clear(campaignContactId.toString());
           await cacheableData.campaignContact.updateAssignmentCache(
             campaignContactId,
             assignmentId,
@@ -364,7 +407,7 @@ export const resolvers = {
   },
   Conversation: {
     texter: queryResult => {
-      console.log("getConversation texter");
+      // console.log("getConversation texter");
       return mapQueryFieldsToResolverFields(queryResult, {
         u_id: "id",
         u_first_name: "first_name",
@@ -372,7 +415,7 @@ export const resolvers = {
       });
     },
     contact: queryResult => {
-      console.log("getConversation contact", queryResult);
+      // console.log("getConversation contact", queryResult);
       return mapQueryFieldsToResolverFields(queryResult, {
         cc_id: "id",
         cc_first_name: "first_name",
@@ -380,7 +423,7 @@ export const resolvers = {
       });
     },
     campaign: queryResult => {
-      console.log("getConversation campaign");
+      // console.log("getConversation campaign");
       return mapQueryFieldsToResolverFields(queryResult, { cmp_id: "id" });
     }
   }

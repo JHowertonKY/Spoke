@@ -1,5 +1,6 @@
 import { CampaignContact, r, cacheableData } from "../models";
 import { mapFieldsToModel } from "./lib/utils";
+import { getConfig } from "./lib/config";
 import { log, getTopMostParent, zipToTimeZone } from "../../lib";
 
 export const resolvers = {
@@ -86,6 +87,22 @@ export const resolvers = {
         campaignContactId: campaignContact.id
       });
       return messages;
+    },
+    tags: async campaignContact => {
+      // TODO: there's more to do here to avoid cache-misses
+      // maybe preload with campaignContact.loadMany
+      if (!getConfig("EXPERIMENTAL_TAGS", null, { truthy: 1 })) {
+        return [];
+      }
+      if (campaignContact.message_status === "needsMessage") {
+        return []; // it's the beginning, so there won't be any
+      }
+
+      if (campaignContact.tags) {
+        return campaignContact.tags;
+      }
+
+      return cacheableData.tagCampaignContact.query(campaignContact.id, true);
     },
     optOut: async (campaignContact, _, { loaders }) => {
       let isOptedOut = null;
