@@ -1,7 +1,7 @@
 # Release Notes
 
-<<<<<<< Updated upstream
-=======
+
+2c6e266873856e3e21adf5fc67d166a74492c65e
 ## v8.0
 
 _August 2020:_ Version 8.0
@@ -49,7 +49,7 @@ This is a major release and therefore requires a schema change. See the deploy s
 ### Appreciations
 
 Thanks to [jasterix](https://github/jasterix), [ibrand](https://github/ibrand), [jeffm2001](https://github/jeffm2001), [lperson](https://github/lperson), [matteosb](https://github/matteosb), [tekkamanendless ](https://github/tekkamanendless), and [schuyler1d](https://github/schuyler1d)
->>>>>>> Stashed changes
+
 
 ## v7.1
 
